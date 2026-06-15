@@ -1,4 +1,4 @@
-"""audio2tab GUI — main window."""
+﻿"""audio2tab GUI -- main window."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QSpinBox, QPushButton, QGroupBox, QSplitter,
-    QMenuBar, QMessageBox, QFileDialog,
+    QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton,
+    QGroupBox, QSplitter, QMenuBar, QMessageBox, QFileDialog,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui import QAction, QFont
@@ -26,7 +26,7 @@ from gui.widgets.tab_preview import TabPreview
 
 
 # ---------------------------------------------------------------------------
-# Pipeline worker — runs in a background thread so the UI stays responsive
+# Pipeline worker -- runs in a background thread so the UI stays responsive
 # ---------------------------------------------------------------------------
 
 class PipelineSignals(QObject):
@@ -78,7 +78,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("audio2tab")
-        self.resize(900, 720)
+        self.resize(900, 740)
         self._worker: PipelineWorker | None = None
         self._tab_path: Path | None = None
 
@@ -92,14 +92,13 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         menubar = self.menuBar()
 
-        # File menu
         file_menu = menubar.addMenu("File")
-        open_act = QAction("Open Audio File…", self)
+        open_act = QAction("Open Audio File...", self)
         open_act.setShortcut("Ctrl+O")
         open_act.triggered.connect(self._open_file)
         file_menu.addAction(open_act)
 
-        save_act = QAction("Save Tab As…", self)
+        save_act = QAction("Save Tab As...", self)
         save_act.setShortcut("Ctrl+S")
         save_act.triggered.connect(self._save_tab)
         file_menu.addAction(save_act)
@@ -110,9 +109,8 @@ class MainWindow(QMainWindow):
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
 
-        # Help menu
         help_menu = menubar.addMenu("Help")
-        cli_act = QAction("CLI Reference…", self)
+        cli_act = QAction("CLI Reference...", self)
         cli_act.triggered.connect(self._show_cli_reference)
         help_menu.addAction(cli_act)
 
@@ -138,35 +136,89 @@ class MainWindow(QMainWindow):
         ig_layout.addWidget(self._file_picker)
         root.addWidget(input_group)
 
-        # --- Options ---
+        # --- Options (two rows) ---
         opts_group = QGroupBox("Options")
-        opts_layout = QHBoxLayout(opts_group)
+        opts_vbox = QVBoxLayout(opts_group)
+        opts_vbox.setSpacing(6)
 
-        opts_layout.addWidget(QLabel("Tuning:"))
+        # Row 1: standard options
+        row1 = QHBoxLayout()
+
+        row1.addWidget(QLabel("Tuning:"))
         self._tuning_combo = QComboBox()
         self._tuning_combo.addItems(sorted(ALL_TUNINGS.keys()))
         self._tuning_combo.setCurrentText("standard")
         self._tuning_combo.setMinimumWidth(140)
-        opts_layout.addWidget(self._tuning_combo)
+        row1.addWidget(self._tuning_combo)
 
-        opts_layout.addWidget(QLabel("Instrument:"))
+        row1.addWidget(QLabel("Instrument:"))
         self._instrument_combo = QComboBox()
         self._instrument_combo.addItems(["auto", "guitar", "bass"])
-        opts_layout.addWidget(self._instrument_combo)
+        row1.addWidget(self._instrument_combo)
 
-        opts_layout.addWidget(QLabel("Quantize:"))
+        row1.addWidget(QLabel("Quantize:"))
         self._quantize_combo = QComboBox()
         self._quantize_combo.addItems(["4th", "8th", "16th", "32nd"])
         self._quantize_combo.setCurrentText("8th")
-        opts_layout.addWidget(self._quantize_combo)
+        row1.addWidget(self._quantize_combo)
 
-        opts_layout.addWidget(QLabel("Measures/line:"))
+        row1.addWidget(QLabel("Measures/line:"))
         self._mpl_spin = QSpinBox()
         self._mpl_spin.setRange(1, 8)
         self._mpl_spin.setValue(4)
-        opts_layout.addWidget(self._mpl_spin)
+        row1.addWidget(self._mpl_spin)
 
-        opts_layout.addStretch()
+        row1.addWidget(QLabel("Max fret:"))
+        self._max_fret_spin = QSpinBox()
+        self._max_fret_spin.setRange(1, 24)
+        self._max_fret_spin.setValue(12)
+        self._max_fret_spin.setToolTip(
+            "Hard upper limit on fret numbers.\n"
+            "Notes that can only be played above this fret are dropped.\n"
+            "12 = first position; raise to 24 for high-fret leads or slide."
+        )
+        row1.addWidget(self._max_fret_spin)
+
+        row1.addStretch()
+        opts_vbox.addLayout(row1)
+
+        # Row 2: advanced / detection quality options
+        row2 = QHBoxLayout()
+        adv_label = QLabel("<i>Advanced:</i>")
+        adv_label.setToolTip("Settings that affect how Basic Pitch detections are filtered")
+        row2.addWidget(adv_label)
+
+        row2.addWidget(QLabel("Min amplitude:"))
+        self._min_amp_spin = QDoubleSpinBox()
+        self._min_amp_spin.setRange(0.05, 0.95)
+        self._min_amp_spin.setSingleStep(0.05)
+        self._min_amp_spin.setDecimals(2)
+        self._min_amp_spin.setValue(0.25)
+        self._min_amp_spin.setToolTip(
+            "Drop notes below this confidence level (0-1).\n"
+            "Higher = fewer notes, less noise. 0.25 is recommended for single-instrument stems.\n"
+            "Lower to 0.15 if real notes are being dropped."
+        )
+        row2.addWidget(self._min_amp_spin)
+
+        row2.addWidget(QLabel("Harmonic filter:"))
+        self._harmonic_ratio_spin = QDoubleSpinBox()
+        self._harmonic_ratio_spin.setRange(0.1, 1.0)
+        self._harmonic_ratio_spin.setSingleStep(0.1)
+        self._harmonic_ratio_spin.setDecimals(1)
+        self._harmonic_ratio_spin.setValue(0.5)
+        self._harmonic_ratio_spin.setToolTip(
+            "Controls how aggressively guitar overtones are suppressed.\n"
+            "When a note is at a harmonic interval (octave, 5th, etc.) above a louder note,\n"
+            "it is dropped if its volume is below this fraction of the louder note.\n"
+            "0.5 = drop if 2x quieter (default). 0.8 = drop if only 25% quieter (more aggressive).\n"
+            "Lower values suppress fewer harmonics."
+        )
+        row2.addWidget(self._harmonic_ratio_spin)
+
+        row2.addStretch()
+        opts_vbox.addLayout(row2)
+
         root.addWidget(opts_group)
 
         # --- Run button ---
@@ -177,7 +229,7 @@ class MainWindow(QMainWindow):
         self._run_btn.clicked.connect(self._run_pipeline)
         btn_row.addWidget(self._run_btn)
 
-        self._save_btn = QPushButton("Save Tab As…")
+        self._save_btn = QPushButton("Save Tab As...")
         self._save_btn.setFixedHeight(36)
         self._save_btn.setEnabled(False)
         self._save_btn.clicked.connect(self._save_tab)
@@ -252,6 +304,10 @@ class MainWindow(QMainWindow):
             instrument=self._instrument_combo.currentText(),
             quantize=self._quantize_combo.currentText(),
             measures_per_line=self._mpl_spin.value(),
+            max_fret=self._max_fret_spin.value(),
+            min_amplitude=self._min_amp_spin.value(),
+            harmonic_ratio=self._harmonic_ratio_spin.value(),
+            suppress_harmonics=True,
         )
 
         self._worker = PipelineWorker(kwargs)
@@ -273,7 +329,6 @@ class MainWindow(QMainWindow):
                 panel.set_running()
                 panel.append_log(message)
                 return
-        # Fallback: append to the currently-running stage
         for panel in self._stage_panels.values():
             panel.append_log(message)
             break
@@ -283,7 +338,6 @@ class MainWindow(QMainWindow):
         tab_path = Path(summary["tab"])
         self._tab_path = tab_path
 
-        # Mark all stages done
         stage_summaries = [
             f"{summary['notes_raw']} raw notes",
             f"{summary['notes_kept']} kept",
@@ -298,7 +352,7 @@ class MainWindow(QMainWindow):
             self._save_btn.setEnabled(True)
 
         self.statusBar().showMessage(
-            f"Done — {summary['measures']} measures at {summary['tempo_bpm']:.1f} BPM  |  {tab_path}"
+            f"Done -- {summary['measures']} measures at {summary['tempo_bpm']:.1f} BPM  |  {tab_path}"
         )
 
     def _on_error(self, msg: str):
@@ -329,8 +383,8 @@ class MainWindow(QMainWindow):
             "<b>audio2tab</b> v0.1.0<br><br>"
             "Converts audio files to guitar/bass tab<br>"
             "using Basic Pitch pitch detection.<br><br>"
-            "Pipeline: Extract → Process → Map → Render<br><br>"
-            "See <b>Help → CLI Reference</b> for command-line usage."
+            "Pipeline: Extract -> Process -> Map -> Render<br><br>"
+            "See <b>Help -> CLI Reference</b> for command-line usage."
         )
 
 
