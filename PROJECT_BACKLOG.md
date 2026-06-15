@@ -16,4 +16,4 @@
 | Item | Description |
 |------|-------------|
 | **Plug-in alternate pitch models** | Architecture hook to swap Basic Pitch for another model (e.g., CREPE, pYIN) if quality is insufficient. |
-| **Desktop shortcut** | `.lnk` or `.bat` launcher for double-click GUI launch without opening PowerShell. |
+| ~~**Desktop shortcut**~~ | ~~`.lnk` or `.bat` launcher for double-click GUI launch without opening PowerShell.~~ **Done** — `audio2tab.lnk` on desktop, targets `gui\launcher.bat`. |
