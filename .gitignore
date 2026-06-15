@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+
+# Generated output
+output/
+logs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Build / packaging
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Inspection / scratch scripts
+inspect_notes.py
+inspect_processed.py
+inspect_mapped.py
+
+# OS
+.DS_Store
+Thumbs.db
