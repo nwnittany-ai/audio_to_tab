@@ -1,4 +1,4 @@
-"""audio2tab CLI — run via: python -m audio2tab <subcommand>"""
+﻿"""audio2tab CLI -- run via: python -m audio2tab <subcommand>"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ logging.basicConfig(
 @click.group()
 @click.version_option("0.1.0", prog_name="audio2tab")
 def cli() -> None:
-    """audio2tab — convert audio to guitar/bass tab."""
+    """audio2tab -- convert audio to guitar/bass tab."""
 
 
 @cli.command()
@@ -98,6 +98,10 @@ def extract(
               help="Override tempo in BPM (skips auto-detection)")
 @click.option("--dedup-octaves", is_flag=True, default=False,
               help="Drop higher note when two octave-apart notes overlap (single-instrument stems only)")
+@click.option("--no-suppress-harmonics", is_flag=True, default=False,
+              help="Disable harmonic suppression (off by default for mixed recordings)")
+@click.option("--harmonic-ratio", default=0.5, show_default=True,
+              help="Harmonic suppression threshold: candidate amp must be < ratio x fundamental amp")
 def process(
     notes_file: Path,
     out: Path | None,
@@ -109,6 +113,8 @@ def process(
     quantize: str,
     tempo: float | None,
     dedup_octaves: bool,
+    no_suppress_harmonics: bool,
+    harmonic_ratio: float,
 ) -> None:
     """Clean and quantize raw note events from NOTES_FILE.
 
@@ -131,6 +137,8 @@ def process(
             quantize=quantize,
             tempo_override=tempo,
             dedup_octaves=dedup_octaves,
+            suppress_harmonics=not no_suppress_harmonics,
+            harmonic_ratio=harmonic_ratio,
         )
         m = result["metadata"]
         click.echo(
@@ -153,18 +161,21 @@ def process(
               help="Fret-hand position window size (number of frets)")
 @click.option("--prefer-high-strings", is_flag=True, default=False,
               help="Prefer higher/thinner strings (lead guitar feel; default: low/thick strings)")
+@click.option("--max-fret", default=24, show_default=True,
+              help="Hard upper limit on fret numbers; notes above this are marked unmapped")
 def map_cmd(
     processed_file: Path,
     out: Path | None,
     tuning: str,
     window: int,
     prefer_high_strings: bool,
+    max_fret: int,
 ) -> None:
     """Map processed note pitches to (string, fret) pairs.
 
     \b
     Example:
-        python -m audio2tab map processed.json --tuning bass --out mapped.json
+        python -m audio2tab map processed.json --tuning bass --max-fret 12 --out mapped.json
     """
     if out is None:
         out = processed_file.parent / f"{processed_file.stem.replace('_processed', '')}_mapped.json"
@@ -176,6 +187,7 @@ def map_cmd(
             tuning=tuning,
             position_window=window,
             prefer_low_strings=not prefer_high_strings,
+            max_fret=max_fret,
         )
         m = result["metadata"]
         click.echo(
@@ -244,8 +256,16 @@ def render(
               help="Measures per line in tab output")
 @click.option("--tempo", default=None, type=float,
               help="Override tempo in BPM")
+@click.option("--min-amplitude", default=0.25, show_default=True,
+              help="Drop notes below this amplitude (0-1); 0.25 is recommended for isolated guitar stems")
+@click.option("--max-fret", default=24, show_default=True,
+              help="Hard upper limit on fret numbers (set to 12 to filter high-fret harmonic artifacts)")
 @click.option("--dedup-octaves", is_flag=True, default=False,
               help="Remove octave duplicates (single-instrument stems only)")
+@click.option("--no-suppress-harmonics", is_flag=True, default=False,
+              help="Disable harmonic overtone suppression")
+@click.option("--harmonic-ratio", default=0.5, show_default=True,
+              help="Harmonic suppression threshold (candidate amp < ratio x fundamental amp)")
 @click.option("--no-intermediates", is_flag=True, default=False,
               help="Delete intermediate JSON files after rendering")
 def run(
@@ -256,7 +276,11 @@ def run(
     quantize: str,
     measures_per_line: int,
     tempo: float | None,
+    min_amplitude: float,
+    max_fret: int,
     dedup_octaves: bool,
+    no_suppress_harmonics: bool,
+    harmonic_ratio: float,
     no_intermediates: bool,
 ) -> None:
     """Run the full pipeline: extract -> process -> map -> render.
@@ -264,6 +288,7 @@ def run(
     \b
     Example:
         python -m audio2tab run guitar_stem.wav --tuning standard --out-dir output/
+        python -m audio2tab run guitar_stem.wav --max-fret 12 --min-amplitude 0.3
         python -m audio2tab run bass_stem.wav --tuning bass --instrument bass
     """
     if out_dir is None:
@@ -278,7 +303,11 @@ def run(
             quantize=quantize,
             measures_per_line=measures_per_line,
             tempo_override=tempo,
+            min_amplitude=min_amplitude,
+            max_fret=max_fret,
             dedup_octaves=dedup_octaves,
+            suppress_harmonics=not no_suppress_harmonics,
+            harmonic_ratio=harmonic_ratio,
             keep_intermediates=not no_intermediates,
         )
         click.echo(

@@ -1,13 +1,14 @@
-"""Stage 2: clean up raw Basic Pitch note events -> refined note list.
+﻿"""Stage 2: clean up raw Basic Pitch note events -> refined note list.
 
 Steps applied in order:
-  1. Pitch range filter   — drop notes outside instrument range
-  2. Amplitude filter     — drop low-confidence detections
-  3. Duration filter      — drop very short noise hits
-  4. Fragment merge       — join same-pitch notes with tiny gaps
-  5. Octave dedup         — when two octaves of the same pitch overlap, keep lower
-  6. Tempo detection      — estimate BPM via librosa beat tracking
-  7. Quantization         — snap onsets/durations to nearest grid subdivision
+  1. Pitch range filter    -- drop notes outside instrument range
+  2. Amplitude filter      -- drop low-confidence detections
+  3. Duration filter       -- drop very short noise hits
+  4. Fragment merge        -- join same-pitch notes with tiny gaps
+  5. Harmonic suppression  -- drop quieter notes whose pitch is a harmonic of a louder co-occurring note
+  6. Octave dedup          -- when two octaves of the same pitch overlap, keep lower
+  7. Tempo detection       -- estimate BPM via librosa beat tracking
+  8. Quantization          -- snap onsets/durations to nearest grid subdivision
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 # Standard instrument pitch ranges (MIDI note numbers)
 INSTRUMENT_RANGES = {
-    "bass":   (28, 67),   # E1 – G4
-    "guitar": (40, 88),   # E2 – E6
+    "bass":   (28, 67),   # E1 - G4
+    "guitar": (40, 88),   # E2 - E6
     "auto":   (28, 88),   # accept both; let dedup sort it out
 }
 
@@ -35,6 +36,10 @@ GRID_SUBDIVISIONS = {
     "16th": 16,
     "32nd": 32,
 }
+
+# Semitone intervals corresponding to guitar harmonic series above fundamental:
+#   7=P5, 12=octave, 19=oct+P5, 24=2oct, 28=2oct+M3, 31=2oct+P5
+_HARMONIC_INTERVALS = frozenset({7, 12, 19, 24, 28, 31})
 
 
 def process(
@@ -48,6 +53,8 @@ def process(
     quantize: str = "16th",
     tempo_override: float | None = None,
     dedup_octaves: bool = False,
+    suppress_harmonics: bool = True,
+    harmonic_ratio: float = 0.5,
 ) -> dict[str, Any]:
     """Clean raw note events and write processed JSON to *output_path*.
 
@@ -58,24 +65,32 @@ def process(
     output_path:
         Destination JSON for cleaned notes.
     audio_path:
-        Original audio file — used for librosa tempo detection.
+        Original audio file -- used for librosa tempo detection.
         If None, tempo detection is skipped and quantization uses *tempo_override*.
     instrument:
-        One of 'bass', 'guitar', 'auto' — sets pitch range filter.
+        One of "bass", "guitar", "auto" -- sets pitch range filter.
     min_amplitude:
-        Drop notes below this amplitude (0–1). Basic Pitch noise tends to be < 0.15.
+        Drop notes below this amplitude (0-1). Basic Pitch noise tends to be < 0.15.
     min_duration_s:
         Drop notes shorter than this after amplitude filter.
     merge_gap_s:
         Merge same-pitch notes whose gap is smaller than this (seconds).
     quantize:
-        Grid subdivision: '4th', '8th', '16th', '32nd'.
+        Grid subdivision: "4th", "8th", "16th", "32nd".
     tempo_override:
         BPM to use if audio_path is None or tempo detection fails.
     dedup_octaves:
         When True, drop the higher note whenever two notes an octave apart overlap.
-        Use only on single-instrument stems — leave False for mixed recordings where
-        multiple instruments may legitimately play different octaves simultaneously.
+        Use only on single-instrument stems -- leave False for mixed recordings.
+    suppress_harmonics:
+        When True (default), drop notes whose pitch is a harmonic interval above a
+        louder simultaneous note. Filters guitar/bass overtones that Basic Pitch
+        detects as separate pitches. Disable for mixed recordings where harmonic
+        intervals between real instruments are expected.
+    harmonic_ratio:
+        A candidate harmonic is suppressed only when its amplitude is below
+        harmonic_ratio x the fundamental amplitude (default 0.5 = 2x quieter).
+        Lower values suppress more aggressively.
     """
     notes_path = Path(notes_path)
     output_path = Path(output_path)
@@ -101,18 +116,29 @@ def process(
     notes = _merge_fragments(notes, merge_gap_s)
     logger.info("After fragment merge (gap < %.3fs): %d notes", merge_gap_s, len(notes))
 
-    # 5. Octave dedup (opt-in only — not appropriate for mixed recordings)
+    # 5. Harmonic suppression
+    if suppress_harmonics:
+        before = len(notes)
+        notes = _suppress_harmonics(notes, harmonic_ratio)
+        logger.info(
+            "After harmonic suppression (ratio=%.2f): %d notes (-%d)",
+            harmonic_ratio, len(notes), before - len(notes),
+        )
+    else:
+        logger.info("Harmonic suppression skipped")
+
+    # 6. Octave dedup (opt-in only)
     if dedup_octaves:
         notes = _dedup_octaves(notes)
         logger.info("After octave dedup: %d notes", len(notes))
     else:
-        logger.info("Octave dedup skipped (mixed recording or single instrument stem)")
+        logger.info("Octave dedup skipped")
 
-    # 6. Tempo detection
+    # 7. Tempo detection
     tempo = _detect_tempo(audio_path, tempo_override)
     logger.info("Tempo: %.1f BPM", tempo)
 
-    # 7. Quantize
+    # 8. Quantize
     grid_div = GRID_SUBDIVISIONS.get(quantize, 16)
     notes = _quantize(notes, tempo, grid_div)
     logger.info("After quantization (%s grid): %d notes", quantize, len(notes))
@@ -128,6 +154,8 @@ def process(
             "quantize": quantize,
             "tempo_bpm": round(tempo, 2),
             "dedup_octaves": dedup_octaves,
+            "suppress_harmonics": suppress_harmonics,
+            "harmonic_ratio": harmonic_ratio,
             "note_count": len(notes),
         },
         "notes": notes,
@@ -144,6 +172,42 @@ def process(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _suppress_harmonics(notes: list[dict], ratio: float) -> list[dict]:
+    """Drop notes that are likely guitar harmonics of a louder simultaneous fundamental.
+
+    For each overlapping pair where the pitch interval is a known harmonic, the
+    higher/quieter note is suppressed when its amplitude < ratio x fundamental amplitude.
+    """
+    if not notes:
+        return notes
+
+    keep_flags = [True] * len(notes)
+
+    for i, candidate in enumerate(notes):
+        if not keep_flags[i]:
+            continue
+        for j, fundamental in enumerate(notes):
+            if i == j or not keep_flags[j]:
+                continue
+            interval = candidate["pitch_midi"] - fundamental["pitch_midi"]
+            if interval not in _HARMONIC_INTERVALS:
+                continue
+            overlap_start = max(candidate["start_time_s"], fundamental["start_time_s"])
+            overlap_end   = min(candidate["end_time_s"],   fundamental["end_time_s"])
+            if overlap_end <= overlap_start:
+                continue
+            if candidate["amplitude"] < ratio * fundamental["amplitude"]:
+                keep_flags[i] = False
+                logger.debug(
+                    "Suppress harmonic: midi=%d (+%d above %d)  amp=%.3f < %.2f x %.3f",
+                    candidate["pitch_midi"], interval, fundamental["pitch_midi"],
+                    candidate["amplitude"], ratio, fundamental["amplitude"],
+                )
+                break
+
+    return [n for n, keep in zip(notes, keep_flags) if keep]
+
+
 def _merge_fragments(notes: list[dict], gap_s: float) -> list[dict]:
     """Merge consecutive notes of the same pitch separated by less than *gap_s*."""
     if not notes:
@@ -156,7 +220,6 @@ def _merge_fragments(notes: list[dict], gap_s: float) -> list[dict]:
         prev = merged[-1]
         gap = n["start_time_s"] - prev["end_time_s"]
         if n["pitch_midi"] == prev["pitch_midi"] and gap < gap_s:
-            # Extend previous note to cover this one
             prev["end_time_s"] = max(prev["end_time_s"], n["end_time_s"])
             prev["duration_s"] = prev["end_time_s"] - prev["start_time_s"]
             prev["amplitude"] = max(prev["amplitude"], n["amplitude"])
@@ -167,12 +230,7 @@ def _merge_fragments(notes: list[dict], gap_s: float) -> list[dict]:
 
 
 def _dedup_octaves(notes: list[dict]) -> list[dict]:
-    """When two notes an octave apart overlap in time, drop the higher one.
-
-    Basic Pitch frequently detects both a note and its octave harmonic
-    (especially on bass). We keep the lower pitch as the more likely
-    fundamental.
-    """
+    """When two notes an octave apart overlap in time, drop the higher one."""
     notes = sorted(notes, key=lambda n: n["start_time_s"])
     keep = []
 
@@ -183,7 +241,6 @@ def _dedup_octaves(notes: list[dict]) -> list[dict]:
                 continue
             if n["pitch_midi"] <= other["pitch_midi"]:
                 continue
-            # n is higher; check time overlap
             overlap_start = max(n["start_time_s"], other["start_time_s"])
             overlap_end = min(n["end_time_s"], other["end_time_s"])
             if overlap_end > overlap_start:

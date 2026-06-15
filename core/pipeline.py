@@ -1,4 +1,4 @@
-"""Stage 5: full pipeline — extract -> process -> map -> render in one call."""
+﻿"""Stage 5: full pipeline -- extract -> process -> map -> render in one call."""
 
 from __future__ import annotations
 
@@ -23,9 +23,12 @@ def run(
     measures_per_line: int = 4,
     onset_threshold: float = 0.5,
     frame_threshold: float = 0.3,
-    min_amplitude: float = 0.15,
+    min_amplitude: float = 0.25,
     position_window: int = 5,
+    max_fret: int = 24,
     dedup_octaves: bool = False,
+    suppress_harmonics: bool = True,
+    harmonic_ratio: float = 0.5,
     tempo_override: float | None = None,
     keep_intermediates: bool = True,
 ) -> dict[str, Any]:
@@ -38,11 +41,11 @@ def run(
     output_dir:
         Directory for all output files (intermediates + final tab).
     tuning:
-        Tuning name for fretboard mapping (e.g. 'standard', 'drop_d', 'bass').
+        Tuning name for fretboard mapping (e.g. "standard", "drop_d", "bass").
     instrument:
-        Pitch range filter for note processing ('guitar', 'bass', 'auto').
+        Pitch range filter for note processing ("guitar", "bass", "auto").
     quantize:
-        Grid subdivision for timing quantization ('4th', '8th', '16th', '32nd').
+        Grid subdivision for timing quantization ("4th", "8th", "16th", "32nd").
     measures_per_line:
         Measures per line in ASCII tab output.
     onset_threshold:
@@ -50,11 +53,20 @@ def run(
     frame_threshold:
         Basic Pitch frame confidence threshold.
     min_amplitude:
-        Minimum note amplitude to keep after extraction.
+        Minimum note amplitude to keep after extraction (default 0.25 for run;
+        the process stage alone defaults to 0.15).
     position_window:
         Fret-hand position window for fretboard mapping.
+    max_fret:
+        Hard upper limit on fret numbers (default 24). Set to 12 to restrict to
+        first-position playing and filter high-fret harmonic false positives.
     dedup_octaves:
         Remove octave duplicates (use only on single-instrument stems).
+    suppress_harmonics:
+        Drop quieter notes at harmonic intervals above a louder co-occurring note.
+        Default True -- disable for mixed recordings.
+    harmonic_ratio:
+        Suppression threshold: harmonic amplitude must be < ratio x fundamental.
     tempo_override:
         Force a specific BPM instead of auto-detecting.
     keep_intermediates:
@@ -92,6 +104,8 @@ def run(
         quantize=quantize,
         tempo_override=tempo_override,
         dedup_octaves=dedup_octaves,
+        suppress_harmonics=suppress_harmonics,
+        harmonic_ratio=harmonic_ratio,
     )
 
     logger.info("=== Stage 3: fretboard mapping ===")
@@ -100,6 +114,7 @@ def run(
         output_path=mapped_path,
         tuning=tuning,
         position_window=position_window,
+        max_fret=max_fret,
     )
 
     logger.info("=== Stage 4: tab rendering ===")
