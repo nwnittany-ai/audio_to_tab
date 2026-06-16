@@ -216,8 +216,16 @@ class MainWindow(QMainWindow):
         )
         row2.addWidget(self._harmonic_ratio_spin)
 
+        self._min_amp_spin.valueChanged.connect(self._update_filter_hint)
+        self._harmonic_ratio_spin.valueChanged.connect(self._update_filter_hint)
+
         row2.addStretch()
         opts_vbox.addLayout(row2)
+
+        # Row 3: dynamic filter hint — populated by _update_filter_hint()
+        self._filter_hint = QLabel()
+        self._filter_hint.setStyleSheet("color: #666; font-style: italic; padding-left: 4px;")
+        opts_vbox.addWidget(self._filter_hint)
 
         root.addWidget(opts_group)
 
@@ -236,6 +244,8 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self._save_btn)
 
         root.addLayout(btn_row)
+
+        self._update_filter_hint()
 
         # --- Stage panels + tab preview in a splitter ---
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -269,6 +279,27 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
+
+    def _update_filter_hint(self):
+        amp = self._min_amp_spin.value()
+        ratio = self._harmonic_ratio_spin.value()
+
+        if amp >= 0.35 and ratio >= 0.7:
+            profile = "very aggressive"
+            detail = "maximum noise rejection — may drop quiet real notes"
+        elif amp >= 0.25 and ratio >= 0.5:
+            profile = "moderate filtering"
+            detail = "recommended for clean single-instrument stems"
+        elif amp >= 0.20 and ratio >= 0.4:
+            profile = "light filtering"
+            detail = "good for stems with some background noise"
+        else:
+            profile = "minimal filtering"
+            detail = "captures most notes; expect some false positives — best for mixed recordings"
+
+        self._filter_hint.setText(
+            f"Amplitude {amp:.2f}, Harmonic {ratio:.1f} — {profile}: {detail}."
+        )
 
     def _on_file_selected(self, path: Path):
         self._run_btn.setEnabled(True)
@@ -402,3 +433,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
