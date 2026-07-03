@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton,
+    QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QCheckBox,
     QGroupBox, QSplitter, QMenuBar, QMessageBox, QFileDialog,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
@@ -179,6 +179,15 @@ class MainWindow(QMainWindow):
         )
         row1.addWidget(self._max_fret_spin)
 
+        self._chord_symbols_chk = QCheckBox("Chord symbols")
+        self._chord_symbols_chk.setChecked(False)
+        self._chord_symbols_chk.setToolTip(
+            "Print the root note (lowest pitch) above the tab at each chord change.\n"
+            "Uses sharps throughout (guitar convention).\n"
+            "Example: G, C#, D, A"
+        )
+        row1.addWidget(self._chord_symbols_chk)
+
         row1.addStretch()
         opts_vbox.addLayout(row1)
 
@@ -339,6 +348,7 @@ class MainWindow(QMainWindow):
             min_amplitude=self._min_amp_spin.value(),
             harmonic_ratio=self._harmonic_ratio_spin.value(),
             suppress_harmonics=True,
+            chord_symbols=self._chord_symbols_chk.isChecked(),
         )
 
         self._worker = PipelineWorker(kwargs)
@@ -433,6 +443,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 

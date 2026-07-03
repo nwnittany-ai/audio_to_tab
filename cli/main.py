@@ -138,6 +138,7 @@ def process(
             tempo_override=tempo,
             dedup_octaves=dedup_octaves,
             suppress_harmonics=not no_suppress_harmonics,
+            chord_symbols=chord_symbols,
             harmonic_ratio=harmonic_ratio,
         )
         m = result["metadata"]
@@ -207,11 +208,14 @@ def map_cmd(
               help="Measures to display per line before wrapping")
 @click.option("--time-sig", default=4, show_default=True,
               help="Beats per measure (numerator of time signature)")
+@click.option("--chord-symbols", is_flag=True, default=False,
+              help="Print root note above tab at each chord change")
 def render(
     mapped_file: Path,
     out: Path | None,
     measures_per_line: int,
     time_sig: int,
+    chord_symbols: bool,
 ) -> None:
     """Render mapped notes to ASCII tab.
 
@@ -228,6 +232,7 @@ def render(
             output_path=out,
             measures_per_line=measures_per_line,
             time_sig_num=time_sig,
+            chord_symbols=chord_symbols,
         )
         m = result["metadata"]
         click.echo(
@@ -268,6 +273,8 @@ def render(
               help="Harmonic suppression threshold (candidate amp < ratio x fundamental amp)")
 @click.option("--no-intermediates", is_flag=True, default=False,
               help="Delete intermediate JSON files after rendering")
+@click.option("--chord-symbols", is_flag=True, default=False,
+              help="Print root note above tab at each chord change")
 def run(
     input_file: Path,
     out_dir: Path | None,
@@ -282,6 +289,7 @@ def run(
     no_suppress_harmonics: bool,
     harmonic_ratio: float,
     no_intermediates: bool,
+    chord_symbols: bool,
 ) -> None:
     """Run the full pipeline: extract -> process -> map -> render.
 
@@ -307,6 +315,7 @@ def run(
             max_fret=max_fret,
             dedup_octaves=dedup_octaves,
             suppress_harmonics=not no_suppress_harmonics,
+            chord_symbols=chord_symbols,
             harmonic_ratio=harmonic_ratio,
             keep_intermediates=not no_intermediates,
         )
@@ -320,3 +329,5 @@ def run(
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
+
+

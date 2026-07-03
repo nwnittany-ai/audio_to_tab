@@ -1,14 +1,14 @@
-"""Stage 4: render (string, fret, timing) data to ASCII tab.
+﻿"""Stage 4: render (string, fret, timing) data to ASCII tab.
 
 Layout
 ------
+  G               C
   e |---0---2---3---|---0-----------|
   B |---0---0---0---|---0-----------|
   G |---0---0---0---|---0-----------|
   D |---2---2---0---|---2-----------|
   A |---3---3---2---|---3-----------|
   E |---0---0---3---|---0-----------|
-       1 e + a 2 e      1           (beat markers, optional)
 
 Conventions
 -----------
@@ -18,6 +18,7 @@ Conventions
 - Each column is wide enough for the widest fret number in that slot.
 - Unmapped notes are silently skipped (logged at DEBUG level).
 - Lines wrap at *measures_per_line* measures.
+- Chord symbols (lowest note of each cluster) printed above tab when enabled.
 """
 
 from __future__ import annotations
@@ -35,6 +36,9 @@ _GUITAR_LABELS = ["e", "B", "G", "D", "A", "E"]
 _BASS_LABELS   = ["G", "D", "A", "E"]
 _BASS5_LABELS  = ["G", "D", "A", "E", "B"]
 
+# Note names using sharps -- guitar convention
+_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
 
 def render(
     mapped_path: Path,
@@ -42,6 +46,7 @@ def render(
     measures_per_line: int = 4,
     time_sig_num: int = 4,
     col_padding: int = 1,
+    chord_symbols: bool = False,
 ) -> dict[str, Any]:
     """Render mapped notes to ASCII tab and write to *output_path*.
 
@@ -57,6 +62,10 @@ def render(
         Beats per measure (default 4 = 4/4 time).
     col_padding:
         Extra dash characters added before each fret number for readability.
+    chord_symbols:
+        When True, print a chord symbol line above each tab line showing the
+        lowest note of each note cluster (changes only -- repeated roots are
+        suppressed). Uses sharps throughout (guitar convention).
     """
     mapped_path = Path(mapped_path)
     output_path = Path(output_path)
@@ -102,6 +111,9 @@ def render(
     # Render measure by measure, grouped into lines
     lines_out: list[str] = []
     label_width = max(len(l) for l in string_labels) + 2  # "E |" etc.
+    chord_prefix = " " * (label_width + 1)  # spaces to align above tab body
+
+    last_root: str | None = None  # track last printed chord symbol across lines
 
     for line_start in range(0, total_measures, measures_per_line):
         line_measures = range(line_start, min(line_start + measures_per_line, total_measures))
@@ -127,6 +139,22 @@ def render(
                 widths.append(w)
             col_widths.append(widths)
 
+        # Build chord symbol line (one character-position per column)
+        if chord_symbols:
+            chord_line_parts: list[str] = [chord_prefix]
+            for m_idx, (m, cols, widths) in enumerate(zip(line_measures, measure_cols, col_widths)):
+                for step_idx, (col, w) in enumerate(zip(cols, widths)):
+                    events = grid[m].get(step_idx, [])
+                    root = _lowest_note(events, open_strings)
+                    if root is not None and root != last_root:
+                        symbol = root.ljust(w)[:w]  # truncate if chord > col width
+                        chord_line_parts.append(symbol)
+                        last_root = root
+                    else:
+                        chord_line_parts.append(" " * w)
+                chord_line_parts.append(" ")  # measure separator space (replaces "|")
+            lines_out.append("".join(chord_line_parts).rstrip())
+
         # Render each string as a row
         string_rows: list[list[str]] = [[] for _ in range(n_strings)]
 
@@ -134,9 +162,7 @@ def render(
             for step_idx, (col, w) in enumerate(zip(cols, widths)):
                 for s_idx in range(n_strings):
                     cell = col[s_idx]
-                    # Pad: fret number left-justified, rest filled with dashes
                     string_rows[s_idx].append(cell.ljust(w, "-"))
-            # Measure separator
             for s_idx in range(n_strings):
                 string_rows[s_idx].append("|")
 
@@ -162,6 +188,7 @@ def render(
             "quantize_subdivisions": quantize_subdiv,
             "measures_per_line": measures_per_line,
             "unmapped_skipped": skipped,
+            "chord_symbols": chord_symbols,
         },
         "output_file": str(output_path),
     }
@@ -171,6 +198,14 @@ def render(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _lowest_note(events: list[tuple[int, int]], open_strings: list[int]) -> str | None:
+    """Return the note name of the lowest-pitched note in a cluster, or None if empty."""
+    if not events:
+        return None
+    lowest_midi = min(open_strings[s] + f for s, f in events)
+    return _NOTE_NAMES[lowest_midi % 12]
+
 
 def _pick_labels(n_strings: int) -> list[str]:
     """Return string label list (high to low) for the given string count."""

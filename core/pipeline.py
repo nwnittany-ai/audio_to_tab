@@ -31,6 +31,7 @@ def run(
     harmonic_ratio: float = 0.5,
     tempo_override: float | None = None,
     keep_intermediates: bool = True,
+    chord_symbols: bool = False,
 ) -> dict[str, Any]:
     """Run all four pipeline stages end-to-end.
 
@@ -122,6 +123,7 @@ def run(
         mapped_path=mapped_path,
         output_path=tab_path,
         measures_per_line=measures_per_line,
+        chord_symbols=chord_symbols,
     )
 
     if not keep_intermediates:
@@ -141,3 +143,4 @@ def run(
         "quantize":   quantize,
     }
     return summary
+
