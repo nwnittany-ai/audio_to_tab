@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QLineEdit, QPushButton, QFileDialog
 from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLineEdit, QPushButton, QWidget
 
 
 class FilePicker(QWidget):
@@ -14,6 +14,7 @@ class FilePicker(QWidget):
     def __init__(self, label: str = "Browse…", filter: str = "Audio (*.wav *.mp3)", parent=None):
         super().__init__(parent)
         self._filter = filter
+        self.start_dir = ""  # where the Browse dialog opens (set from the saved "default input folder")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -29,7 +30,7 @@ class FilePicker(QWidget):
         layout.addWidget(btn)
 
     def _browse(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select audio file", "", self._filter)
+        path, _ = QFileDialog.getOpenFileName(self, "Select audio file", self.start_dir, self._filter)
         if path:
             p = Path(path)
             self._path_edit.setText(str(p))

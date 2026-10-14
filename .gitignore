@@ -17,10 +17,13 @@ dist/
 build/
 *.whl
 
-# Inspection / scratch scripts
-inspect_notes.py
-inspect_processed.py
-inspect_mapped.py
+# Inspection / scratch scripts (keep throwaway scripts in scratch/)
+scratch/
+debug_*.py
+inspect_*.py
+
+# Saved GUI settings (user-specific)
+audio2tab_config.json
 
 # OS
 .DS_Store
