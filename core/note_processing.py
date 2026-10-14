@@ -1,14 +1,17 @@
 ﻿"""Stage 2: clean up raw Basic Pitch note events -> refined note list.
 
 Steps applied in order:
-  1. Pitch range filter    -- drop notes outside instrument range
-  2. Amplitude filter      -- drop low-confidence detections
-  3. Duration filter       -- drop very short noise hits
+  1. Amplitude filter      -- drop low-confidence detections
+  2. Duration filter       -- drop very short noise hits
+  3. Instrument + range    -- "auto" decides guitar vs bass from the notes themselves, then drops notes outside
+                              that instrument's range (a guitar cannot play below E2, so sub-E2 notes are noise)
   4. Fragment merge        -- join same-pitch notes with tiny gaps
-  5. Harmonic suppression  -- drop quieter notes whose pitch is a harmonic of a louder co-occurring note
-  6. Octave dedup          -- when two octaves of the same pitch overlap, keep lower
-  7. Tempo detection       -- estimate BPM via librosa beat tracking
-  8. Quantization          -- snap onsets/durations to nearest grid subdivision
+  5. Ghost filter (opt-in) -- drop short "release ghost" notes: a quiet blip just below a note that has just ended
+  6. Harmonic suppression  -- drop quieter notes whose pitch is a harmonic of a louder co-occurring note
+  7. Octave dedup (opt-in) -- when two octaves of the same pitch overlap, keep lower
+  8. Tempo detection       -- estimate BPM via librosa beat tracking
+  9. Quantization          -- snap onsets/durations to nearest grid subdivision (the as-played times are kept
+                              in orig_start_time_s / orig_end_time_s for MIDI export)
 """
 
 from __future__ import annotations
@@ -20,6 +23,16 @@ from typing import Any
 
 import librosa
 import numpy as np
+
+from config.defaults import (
+    AUTO_GUITAR_LOW_SHARE,
+    DEFAULTS,
+    GHOST_MAX_DURATION_S,
+    GHOST_MAX_INTERVAL,
+    GHOST_RATIO,
+    GHOST_START_TOLERANCE_S,
+    GUITAR_LOWEST_MIDI,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +59,16 @@ def process(
     notes_path: Path,
     output_path: Path,
     audio_path: Path | None = None,
-    instrument: str = "auto",
-    min_amplitude: float = 0.15,
-    min_duration_s: float = 0.05,
-    merge_gap_s: float = 0.08,
-    quantize: str = "16th",
+    instrument: str = DEFAULTS["instrument"],
+    min_amplitude: float = DEFAULTS["min_amplitude"],
+    min_duration_s: float = DEFAULTS["min_duration_s"],
+    merge_gap_s: float = DEFAULTS["merge_gap_s"],
+    quantize: str = DEFAULTS["quantize"],
     tempo_override: float | None = None,
-    dedup_octaves: bool = False,
-    suppress_harmonics: bool = True,
-    harmonic_ratio: float = 0.5,
+    dedup_octaves: bool = DEFAULTS["dedup_octaves"],
+    suppress_harmonics: bool = DEFAULTS["suppress_harmonics"],
+    harmonic_ratio: float = DEFAULTS["harmonic_ratio"],
+    ghost_filter: bool = DEFAULTS["ghost_filter"],
 ) -> dict[str, Any]:
     """Clean raw note events and write processed JSON to *output_path*.
 
@@ -68,7 +82,8 @@ def process(
         Original audio file -- used for librosa tempo detection.
         If None, tempo detection is skipped and quantization uses *tempo_override*.
     instrument:
-        One of "bass", "guitar", "auto" -- sets pitch range filter.
+        One of "bass", "guitar", "auto". "auto" decides from the notes (see resolve_instrument) and
+        records its decision in the output metadata.
     min_amplitude:
         Drop notes below this amplitude (0-1). Basic Pitch noise tends to be < 0.15.
     min_duration_s:
@@ -91,6 +106,10 @@ def process(
         A candidate harmonic is suppressed only when its amplitude is below
         harmonic_ratio x the fundamental amplitude (default 0.5 = 2x quieter).
         Lower values suppress more aggressively.
+    ghost_filter:
+        Opt-in. Drop "release ghosts": a very short, quieter note 1-2 semitones below a note that has just ended
+        (lifting a finger lets the string below ring briefly). Leave off if you play pull-offs or fast descending
+        lines, which make real notes that look the same.
     """
     notes_path = Path(notes_path)
     output_path = Path(output_path)
@@ -99,24 +118,34 @@ def process(
     notes: list[dict] = raw["notes"]
     logger.info("Loaded %d raw notes from %s", len(notes), notes_path.name)
 
-    # 1. Pitch range
-    lo, hi = INSTRUMENT_RANGES.get(instrument, INSTRUMENT_RANGES["auto"])
-    notes = [n for n in notes if lo <= n["pitch_midi"] <= hi]
-    logger.info("After pitch range filter [%d-%d]: %d notes", lo, hi, len(notes))
-
-    # 2. Amplitude
+    # 1. Amplitude
     notes = [n for n in notes if n["amplitude"] >= min_amplitude]
     logger.info("After amplitude filter (>= %.2f): %d notes", min_amplitude, len(notes))
 
-    # 3. Duration
+    # 2. Duration
     notes = [n for n in notes if n["duration_s"] >= min_duration_s]
     logger.info("After duration filter (>= %.3fs): %d notes", min_duration_s, len(notes))
+
+    # 3. Instrument + pitch range
+    resolved, (lo, hi), low_share = resolve_instrument(notes, instrument)
+    if instrument == "auto":
+        logger.info("Auto instrument: %s (%.1f%% of notes below E2)", resolved, 100 * (low_share or 0.0))
+    notes = [n for n in notes if lo <= n["pitch_midi"] <= hi]
+    logger.info("After pitch range filter [%d-%d]: %d notes", lo, hi, len(notes))
 
     # 4. Fragment merge
     notes = _merge_fragments(notes, merge_gap_s)
     logger.info("After fragment merge (gap < %.3fs): %d notes", merge_gap_s, len(notes))
 
-    # 5. Harmonic suppression
+    # 5. Ghost filter (opt-in)
+    ghost_removed = 0
+    if ghost_filter:
+        before = len(notes)
+        notes = _drop_ghost_notes(notes)
+        ghost_removed = before - len(notes)
+        logger.info("After ghost filter: %d notes (-%d)", len(notes), ghost_removed)
+
+    # 6. Harmonic suppression
     if suppress_harmonics:
         before = len(notes)
         notes = _suppress_harmonics(notes, harmonic_ratio)
@@ -147,6 +176,8 @@ def process(
         "metadata": {
             "source_notes": str(notes_path),
             "instrument": instrument,
+            "instrument_resolved": resolved,
+            "low_note_share": None if low_share is None else round(low_share, 4),
             "pitch_range": [lo, hi],
             "min_amplitude": min_amplitude,
             "min_duration_s": min_duration_s,
@@ -156,6 +187,8 @@ def process(
             "dedup_octaves": dedup_octaves,
             "suppress_harmonics": suppress_harmonics,
             "harmonic_ratio": harmonic_ratio,
+            "ghost_filter": ghost_filter,
+            "ghost_removed": ghost_removed,
             "note_count": len(notes),
         },
         "notes": notes,
@@ -169,8 +202,61 @@ def process(
 
 
 # ---------------------------------------------------------------------------
+# Instrument decision
+# ---------------------------------------------------------------------------
+
+def resolve_instrument(notes: list[dict], instrument: str) -> tuple[str, tuple[int, int], float | None]:
+    """Decide which instrument a set of notes belongs to; returns (resolved, (lowest, highest MIDI), low_share).
+
+    An explicit "guitar" or "bass" is used as given (low_share is None). For "auto" the share of notes below E2
+    (MIDI 40, the lowest guitar string) decides: under AUTO_GUITAR_LOW_SHARE it is guitar, so impossible sub-E2
+    notes (rumble, ghosts) are dropped; otherwise it is bass or a mix, and the wide legacy range is kept so
+    nothing is lost. A wrong guess therefore errs toward keeping notes.
+    """
+    if instrument != "auto":
+        return instrument, INSTRUMENT_RANGES[instrument], None
+    lo, hi = INSTRUMENT_RANGES["auto"]
+    candidates = [n for n in notes if lo <= n["pitch_midi"] <= hi]
+    if not candidates:
+        return "guitar", INSTRUMENT_RANGES["guitar"], 0.0
+    share = sum(1 for n in candidates if n["pitch_midi"] < GUITAR_LOWEST_MIDI) / len(candidates)
+    if share < AUTO_GUITAR_LOW_SHARE:
+        return "guitar", INSTRUMENT_RANGES["guitar"], share
+    return "bass", INSTRUMENT_RANGES["auto"], share
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _drop_ghost_notes(
+    notes: list[dict],
+    start_tolerance_s: float = GHOST_START_TOLERANCE_S,
+    max_duration_s: float = GHOST_MAX_DURATION_S,
+    ratio: float = GHOST_RATIO,
+    max_interval: int = GHOST_MAX_INTERVAL,
+) -> list[dict]:
+    """Drop "release ghosts": short, quieter notes 1-2 semitones below a note that has just ended.
+
+    Lifting a finger off a fretted note lets the string below ring briefly; the detector reports that as a
+    tiny extra note starting exactly when the previous note stops (e.g. a stray open E2 right after an F2).
+    """
+    keep = [True] * len(notes)
+    for i, ghost in enumerate(notes):
+        if ghost["duration_s"] > max_duration_s:
+            continue
+        for j, prev in enumerate(notes):
+            if i == j or not keep[j]:
+                continue
+            if not 1 <= prev["pitch_midi"] - ghost["pitch_midi"] <= max_interval:
+                continue
+            if not -0.02 <= ghost["start_time_s"] - prev["end_time_s"] <= start_tolerance_s:
+                continue
+            if ghost["amplitude"] < ratio * prev["amplitude"]:
+                keep[i] = False
+                break
+    return [n for n, k in zip(notes, keep) if k]
+
 
 def _suppress_harmonics(notes: list[dict], ratio: float) -> list[dict]:
     """Drop notes that are likely guitar harmonics of a louder simultaneous fundamental.
@@ -279,6 +365,8 @@ def _quantize(notes: list[dict], tempo_bpm: float, subdivisions: int) -> list[di
     result = []
     for n in notes:
         n = n.copy()
+        n["orig_start_time_s"] = n["start_time_s"]  # as performed; MIDI export uses these ("played" timing)
+        n["orig_end_time_s"] = n["end_time_s"]
         onset_q = round(n["start_time_s"] / grid_s) * grid_s
         dur_steps = max(1, round(n["duration_s"] / grid_s))
         dur_q = dur_steps * grid_s

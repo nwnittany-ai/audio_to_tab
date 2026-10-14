@@ -27,3 +27,8 @@ audio2tab = "cli.main:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cli*", "core*", "config*", "gui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["slow: runs the real Basic Pitch model on audio (about a minute)"]
