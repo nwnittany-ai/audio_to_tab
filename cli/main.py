@@ -1,4 +1,4 @@
-﻿"""audio2tab CLI -- run via: python -m audio2tab <subcommand>"""
+"""audio2tab CLI -- run via: audio2tab <subcommand>   (or: python __main__.py <subcommand>)"""
 
 from __future__ import annotations
 
@@ -8,12 +8,20 @@ from pathlib import Path
 
 import click
 
-from core.pitch_extraction import extract as _extract
-from core.note_processing import process as _process, INSTRUMENT_RANGES, GRID_SUBDIVISIONS
-from core.fretboard_mapping import map_notes as _map
-from core.tab_renderer import render as _render
-from core.pipeline import run as _run
+from config.defaults import (
+    DEFAULTS,
+    INSTRUMENT_CHOICES,
+    MIDI_TIMING_CHOICES,
+    QUANTIZE_CHOICES,
+    VERSION,
+)
 from config.tunings import ALL_TUNINGS
+from core.fretboard_mapping import map_notes as _map
+from core.midi_export import export as _midi
+from core.note_processing import process as _process
+from core.pipeline import run as _run
+from core.pitch_extraction import extract as _extract
+from core.tab_renderer import render as _render
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,18 +31,22 @@ logging.basicConfig(
 
 
 @click.group()
-@click.version_option("0.1.0", prog_name="audio2tab")
+@click.version_option(VERSION, prog_name="audio2tab")
 def cli() -> None:
-    """audio2tab -- convert audio to guitar/bass tab."""
+    """audio2tab -- convert audio to guitar/bass tab and MIDI."""
 
+
+# ---------------------------------------------------------------------------
+# Stage 1
+# ---------------------------------------------------------------------------
 
 @cli.command()
 @click.argument("input_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--out", "-o", type=click.Path(path_type=Path), default=None,
               help="Output JSON path (default: <input_stem>_notes.json beside input)")
-@click.option("--onset-threshold", default=0.5, show_default=True,
+@click.option("--onset-threshold", default=DEFAULTS["onset_threshold"], show_default=True,
               help="Basic Pitch onset confidence threshold (0-1)")
-@click.option("--frame-threshold", default=0.3, show_default=True,
+@click.option("--frame-threshold", default=DEFAULTS["frame_threshold"], show_default=True,
               help="Basic Pitch frame confidence threshold (0-1)")
 @click.option("--min-note-length", default=0.058, show_default=True,
               help="Minimum note length in seconds")
@@ -55,7 +67,7 @@ def extract(
 
     \b
     Example:
-        python -m audio2tab extract guitar_stem.wav --out notes.json
+        audio2tab extract guitar_stem.wav --out notes.json
     """
     if out is None:
         out = input_file.parent / f"{input_file.stem}_notes.json"
@@ -76,32 +88,39 @@ def extract(
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Stage 2
+# ---------------------------------------------------------------------------
+
 @cli.command()
 @click.argument("notes_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--out", "-o", type=click.Path(path_type=Path), default=None,
               help="Output JSON path (default: <stem>_processed.json)")
 @click.option("--audio", type=click.Path(exists=True, path_type=Path), default=None,
               help="Original audio file for tempo detection")
-@click.option("--instrument", default="auto", show_default=True,
-              type=click.Choice(list(INSTRUMENT_RANGES.keys())),
-              help="Instrument pitch range filter")
-@click.option("--min-amplitude", default=0.15, show_default=True,
+@click.option("--instrument", default=DEFAULTS["instrument"], show_default=True,
+              type=click.Choice(list(INSTRUMENT_CHOICES)),
+              help="Instrument; auto decides guitar vs bass from the notes")
+@click.option("--min-amplitude", default=DEFAULTS["min_amplitude"], show_default=True,
               help="Drop notes below this amplitude (0-1)")
-@click.option("--min-duration", default=0.05, show_default=True,
+@click.option("--min-duration", default=DEFAULTS["min_duration_s"], show_default=True,
               help="Drop notes shorter than this (seconds)")
-@click.option("--merge-gap", default=0.08, show_default=True,
+@click.option("--merge-gap", default=DEFAULTS["merge_gap_s"], show_default=True,
               help="Merge same-pitch notes with gap smaller than this (seconds)")
-@click.option("--quantize", default="16th", show_default=True,
-              type=click.Choice(list(GRID_SUBDIVISIONS.keys())),
+@click.option("--quantize", default=DEFAULTS["quantize"], show_default=True,
+              type=click.Choice(list(QUANTIZE_CHOICES)),
               help="Quantization grid subdivision")
 @click.option("--tempo", default=None, type=float,
               help="Override tempo in BPM (skips auto-detection)")
 @click.option("--dedup-octaves", is_flag=True, default=False,
               help="Drop higher note when two octave-apart notes overlap (single-instrument stems only)")
 @click.option("--no-suppress-harmonics", is_flag=True, default=False,
-              help="Disable harmonic suppression (off by default for mixed recordings)")
-@click.option("--harmonic-ratio", default=0.5, show_default=True,
+              help="Disable harmonic overtone suppression (it is ON by default)")
+@click.option("--harmonic-ratio", default=DEFAULTS["harmonic_ratio"], show_default=True,
               help="Harmonic suppression threshold: candidate amp must be < ratio x fundamental amp")
+@click.option("--ghost-filter", is_flag=True, default=False,
+              help="Drop short 'release ghost' notes (a quiet blip just below a note that has ended). "
+                   "Off by default: pull-offs create real notes that look the same")
 def process(
     notes_file: Path,
     out: Path | None,
@@ -115,12 +134,13 @@ def process(
     dedup_octaves: bool,
     no_suppress_harmonics: bool,
     harmonic_ratio: float,
+    ghost_filter: bool,
 ) -> None:
     """Clean and quantize raw note events from NOTES_FILE.
 
     \b
     Example:
-        python -m audio2tab process notes.json --audio song.mp3 --instrument bass --out processed.json
+        audio2tab process notes.json --audio song.mp3 --instrument bass --out processed.json
     """
     if out is None:
         out = notes_file.parent / f"{notes_file.stem.replace('_notes', '')}_processed.json"
@@ -138,12 +158,12 @@ def process(
             tempo_override=tempo,
             dedup_octaves=dedup_octaves,
             suppress_harmonics=not no_suppress_harmonics,
-            chord_symbols=chord_symbols,
             harmonic_ratio=harmonic_ratio,
+            ghost_filter=ghost_filter,
         )
         m = result["metadata"]
         click.echo(
-            f"Processed {m['note_count']} notes at {m['tempo_bpm']} BPM "
+            f"Processed {m['note_count']} notes ({m['instrument_resolved']}) at {m['tempo_bpm']} BPM "
             f"({m['quantize']} grid) -> {out}"
         )
     except Exception as exc:
@@ -151,18 +171,22 @@ def process(
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Stage 3
+# ---------------------------------------------------------------------------
+
 @cli.command("map")
 @click.argument("processed_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--out", "-o", type=click.Path(path_type=Path), default=None,
               help="Output JSON path (default: <stem>_mapped.json)")
-@click.option("--tuning", default="standard", show_default=True,
+@click.option("--tuning", default=DEFAULTS["tuning"], show_default=True,
               type=click.Choice(sorted(ALL_TUNINGS.keys())),
               help="Tuning name from config/tunings.py")
-@click.option("--window", default=5, show_default=True,
+@click.option("--window", default=DEFAULTS["position_window"], show_default=True,
               help="Fret-hand position window size (number of frets)")
 @click.option("--prefer-high-strings", is_flag=True, default=False,
               help="Prefer higher/thinner strings (lead guitar feel; default: low/thick strings)")
-@click.option("--max-fret", default=24, show_default=True,
+@click.option("--max-fret", default=DEFAULTS["max_fret"], show_default=True,
               help="Hard upper limit on fret numbers; notes above this are marked unmapped")
 def map_cmd(
     processed_file: Path,
@@ -176,7 +200,7 @@ def map_cmd(
 
     \b
     Example:
-        python -m audio2tab map processed.json --tuning bass --max-fret 12 --out mapped.json
+        audio2tab map processed.json --tuning bass --max-fret 12 --out mapped.json
     """
     if out is None:
         out = processed_file.parent / f"{processed_file.stem.replace('_processed', '')}_mapped.json"
@@ -200,11 +224,15 @@ def map_cmd(
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Stage 4
+# ---------------------------------------------------------------------------
+
 @cli.command()
 @click.argument("mapped_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--out", "-o", type=click.Path(path_type=Path), default=None,
               help="Output .tab file (default: <stem>.tab)")
-@click.option("--measures-per-line", default=4, show_default=True,
+@click.option("--measures-per-line", default=DEFAULTS["measures_per_line"], show_default=True,
               help="Measures to display per line before wrapping")
 @click.option("--time-sig", default=4, show_default=True,
               help="Beats per measure (numerator of time signature)")
@@ -221,7 +249,7 @@ def render(
 
     \b
     Example:
-        python -m audio2tab render mapped.json --out song.tab
+        audio2tab render mapped.json --out song.tab
     """
     if out is None:
         out = mapped_file.parent / f"{mapped_file.stem.replace('_mapped', '')}.tab"
@@ -244,33 +272,77 @@ def render(
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Stage 5
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("processed_file", type=click.Path(exists=True, path_type=Path))
+@click.option("--out", "-o", type=click.Path(path_type=Path), default=None,
+              help="Output .mid file (default: <stem>.mid)")
+@click.option("--timing", default=DEFAULTS["midi_timing"], show_default=True,
+              type=click.Choice(list(MIDI_TIMING_CHOICES)),
+              help="played = notes as performed (keeps the feel); grid = snapped to the quantize grid")
+@click.option("--tempo", default=None, type=float, help="Override the tempo written to the MIDI file (BPM)")
+def midi(processed_file: Path, out: Path | None, timing: str, tempo: float | None) -> None:
+    """Write the cleaned notes in PROCESSED_FILE as a MIDI file.
+
+    \b
+    Example:
+        audio2tab midi song_processed.json --out song.mid
+    """
+    if out is None:
+        out = processed_file.parent / f"{processed_file.stem.replace('_processed', '')}.mid"
+
+    try:
+        s = _midi(processed_path=processed_file, output_path=out, timing=timing, tempo_override=tempo)
+        click.echo(
+            f"Wrote {s['note_count']} notes ({s['instrument']}, {s['timing']} timing, "
+            f"{s['tempo_bpm']:.1f} BPM) -> {out}"
+        )
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Whole pipeline
+# ---------------------------------------------------------------------------
+
 @cli.command()
 @click.argument("input_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--out-dir", "-d", type=click.Path(path_type=Path), default=None,
-              help="Output directory (default: ./output)")
-@click.option("--tuning", default="standard", show_default=True,
+              help="Output directory (default: a 'tab_output' folder beside the input file, as in the window)")
+@click.option("--tuning", default=DEFAULTS["tuning"], show_default=True,
               type=click.Choice(sorted(ALL_TUNINGS.keys())),
               help="Tuning for fretboard mapping")
-@click.option("--instrument", default="auto", show_default=True,
-              type=click.Choice(["guitar", "bass", "auto"]),
-              help="Instrument pitch range filter")
-@click.option("--quantize", default="8th", show_default=True,
-              type=click.Choice(["4th", "8th", "16th", "32nd"]),
+@click.option("--instrument", default=DEFAULTS["instrument"], show_default=True,
+              type=click.Choice(list(INSTRUMENT_CHOICES)),
+              help="Instrument; auto decides guitar vs bass from the notes")
+@click.option("--quantize", default=DEFAULTS["quantize"], show_default=True,
+              type=click.Choice(list(QUANTIZE_CHOICES)),
               help="Timing quantization grid")
-@click.option("--measures-per-line", default=4, show_default=True,
+@click.option("--measures-per-line", default=DEFAULTS["measures_per_line"], show_default=True,
               help="Measures per line in tab output")
 @click.option("--tempo", default=None, type=float,
               help="Override tempo in BPM")
-@click.option("--min-amplitude", default=0.25, show_default=True,
+@click.option("--min-amplitude", default=DEFAULTS["min_amplitude"], show_default=True,
               help="Drop notes below this amplitude (0-1); 0.25 is recommended for isolated guitar stems")
-@click.option("--max-fret", default=24, show_default=True,
-              help="Hard upper limit on fret numbers (set to 12 to filter high-fret harmonic artifacts)")
+@click.option("--max-fret", default=DEFAULTS["max_fret"], show_default=True,
+              help="Highest fret allowed (12 = first position; use 24 for high-fret leads)")
 @click.option("--dedup-octaves", is_flag=True, default=False,
               help="Remove octave duplicates (single-instrument stems only)")
 @click.option("--no-suppress-harmonics", is_flag=True, default=False,
-              help="Disable harmonic overtone suppression")
-@click.option("--harmonic-ratio", default=0.5, show_default=True,
+              help="Disable harmonic overtone suppression (it is ON by default)")
+@click.option("--harmonic-ratio", default=DEFAULTS["harmonic_ratio"], show_default=True,
               help="Harmonic suppression threshold (candidate amp < ratio x fundamental amp)")
+@click.option("--ghost-filter", is_flag=True, default=False,
+              help="Drop short 'release ghost' notes (off by default: pull-offs look the same)")
+@click.option("--midi/--no-midi", "midi_flag", default=DEFAULTS["midi"], show_default=True,
+              help="Also write a .mid file")
+@click.option("--midi-timing", default=DEFAULTS["midi_timing"], show_default=True,
+              type=click.Choice(list(MIDI_TIMING_CHOICES)),
+              help="played = as performed (keeps the feel); grid = snapped to the quantize grid")
 @click.option("--no-intermediates", is_flag=True, default=False,
               help="Delete intermediate JSON files after rendering")
 @click.option("--chord-symbols", is_flag=True, default=False,
@@ -288,19 +360,22 @@ def run(
     dedup_octaves: bool,
     no_suppress_harmonics: bool,
     harmonic_ratio: float,
+    ghost_filter: bool,
+    midi_flag: bool,
+    midi_timing: str,
     no_intermediates: bool,
     chord_symbols: bool,
 ) -> None:
-    """Run the full pipeline: extract -> process -> map -> render.
+    """Run the full pipeline: extract -> process -> map -> render -> MIDI.
 
     \b
     Example:
-        python -m audio2tab run guitar_stem.wav --tuning standard --out-dir output/
-        python -m audio2tab run guitar_stem.wav --max-fret 12 --min-amplitude 0.3
-        python -m audio2tab run bass_stem.wav --tuning bass --instrument bass
+        audio2tab run guitar_stem.wav --tuning standard
+        audio2tab run guitar_stem.wav --max-fret 24 --min-amplitude 0.3
+        audio2tab run bass_stem.wav --tuning bass --instrument bass --no-midi
     """
     if out_dir is None:
-        out_dir = Path("output")
+        out_dir = input_file.parent / "tab_output"
 
     try:
         summary = _run(
@@ -317,17 +392,23 @@ def run(
             suppress_harmonics=not no_suppress_harmonics,
             chord_symbols=chord_symbols,
             harmonic_ratio=harmonic_ratio,
+            ghost_filter=ghost_filter,
+            midi=midi_flag,
+            midi_timing=midi_timing,
             keep_intermediates=not no_intermediates,
         )
-        click.echo(
-            f"\nDone: {summary['measures']} measures | "
-            f"{summary['tempo_bpm']:.1f} BPM | "
-            f"{summary['notes_raw']} raw -> {summary['notes_kept']} kept -> "
-            f"{summary['notes_mapped']} mapped\n"
-            f"Tab: {summary['tab']}"
-        )
+        lines = [
+            f"\nDone: {summary['measures']} measures | {summary['tempo_bpm']:.1f} BPM | {summary['instrument']} | "
+            f"{summary['notes_raw']} raw -> {summary['notes_kept']} kept -> {summary['notes_mapped']} mapped",
+            f"Tab:  {summary['tab']}",
+        ]
+        if summary["midi"]:
+            lines.append(f"MIDI: {summary['midi']}  ({summary['midi_notes']} notes)")
+        click.echo("\n".join(lines))
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
 
+if __name__ == "__main__":
+    cli()
